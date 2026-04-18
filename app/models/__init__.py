@@ -4,6 +4,7 @@ from app.models.credential import Credential
 from app.models.device import Device
 from app.models.config_snapshot import ConfigSnapshot
 from app.models.change_event import ChangeEvent, AlertRule, AuditLog
+from app.models.discovery import DiscoveryJob, DiscoveredHost
 
 __all__ = [
     "Organization",
@@ -14,4 +15,6 @@ __all__ = [
     "ChangeEvent",
     "AlertRule",
     "AuditLog",
+    "DiscoveryJob",
+    "DiscoveredHost",
 ]

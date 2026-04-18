@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.routers import auth, devices, snapshots, alerts
+from app.routers import auth, devices, snapshots, alerts, discovery
 
 app = FastAPI(
     title="Network Config Manager API",
@@ -24,6 +24,7 @@ app.include_router(auth.router, prefix=PREFIX)
 app.include_router(devices.router, prefix=PREFIX)
 app.include_router(snapshots.router, prefix=PREFIX)
 app.include_router(alerts.router, prefix=PREFIX)
+app.include_router(discovery.router, prefix=PREFIX)
 
 
 @app.get("/health", tags=["health"])

@@ -12,6 +12,8 @@ celery_app = Celery(
     backend=settings.REDIS_URL,
 )
 
+celery_app.autodiscover_tasks(["app.workers"])
+
 celery_app.conf.update(
     task_serializer="json",
     result_serializer="json",
