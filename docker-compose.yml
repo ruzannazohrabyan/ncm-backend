@@ -13,10 +13,10 @@ services:
     ports:
       - "5432:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-ncm}"]
-      interval: 10s
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-ncm} -d ${POSTGRES_DB:-ncmdb}"]
+      interval: 5s
       timeout: 5s
-      retries: 5
+      retries: 10
 
   redis:
     image: redis:7-alpine
@@ -25,14 +25,13 @@ services:
       - "6379:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
+      interval: 5s
       timeout: 5s
-      retries: 5
+      retries: 10
 
   api:
     build: .
     restart: unless-stopped
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
     volumes:
       - .:/app
     ports:
@@ -43,6 +42,13 @@ services:
       - SECRET_KEY=${SECRET_KEY:-changeme-in-production}
       - ENCRYPTION_KEY=${ENCRYPTION_KEY}
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - POSTGRES_USER=${POSTGRES_USER:-ncm}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-ncmpassword}
+      - POSTGRES_DB=${POSTGRES_DB:-ncmdb}
+      - SEED_ADMIN_EMAIL=${SEED_ADMIN_EMAIL:-admin@ncm.local}
+      - SEED_ADMIN_PASSWORD=${SEED_ADMIN_PASSWORD:-Admin1234!}
+      - SEED_ORG_NAME=${SEED_ORG_NAME:-My Organization}
+      - SEED_ORG_SLUG=${SEED_ORG_SLUG:-my-org}
     depends_on:
       db:
         condition: service_healthy
@@ -52,7 +58,7 @@ services:
   worker:
     build: .
     restart: unless-stopped
-    command: celery -A app.workers.celery_app worker --loglevel=info
+    entrypoint: ["celery", "-A", "app.workers.celery_app", "worker", "--loglevel=info"]
     volumes:
       - .:/app
     environment:
@@ -70,7 +76,7 @@ services:
   beat:
     build: .
     restart: unless-stopped
-    command: celery -A app.workers.celery_app beat --loglevel=info
+    entrypoint: ["celery", "-A", "app.workers.celery_app", "beat", "--loglevel=info"]
     volumes:
       - .:/app
     environment:
