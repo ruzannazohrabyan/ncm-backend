@@ -13,6 +13,7 @@ celery_app = Celery(
 )
 
 celery_app.autodiscover_tasks(["app.workers"])
+celery_app.conf.imports = ("app.workers.discovery_task",)
 
 celery_app.conf.update(
     task_serializer="json",

@@ -83,3 +83,28 @@ class ImportedDeviceOut(BaseModel):
     host_id: str
     device_id: str
     ip_address: str
+
+
+class BulkJobRequest(BaseModel):
+    job_ids: list[str]
+
+    @field_validator("job_ids")
+    @classmethod
+    def non_empty(cls, v: list[str]) -> list[str]:
+        if not v:
+            raise ValueError("job_ids must not be empty")
+        return v
+
+
+class BulkJobResultItem(BaseModel):
+    job_id: str
+    status: str  # "ok" | "skipped" | "not_found"
+    detail: Optional[str] = None
+
+
+class BulkJobResponse(BaseModel):
+    requested: int
+    succeeded: int
+    skipped: int
+    not_found: int
+    results: list[BulkJobResultItem]

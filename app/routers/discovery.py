@@ -38,6 +38,9 @@ from app.models.device import Device
 from app.models.discovery import DiscoveredHost, DiscoveryJob
 from app.models.user import User
 from app.schemas.discovery import (
+    BulkJobRequest,
+    BulkJobResponse,
+    BulkJobResultItem,
     DiscoveryJobDetail,
     DiscoveryJobOut,
     DiscoveredHostOut,
@@ -109,6 +112,119 @@ async def list_jobs(
     return result.scalars().all()
 
 
+# ── POST /discovery/bulk/cancel ──────────────────────────────────────────────
+# NOTE: bulk routes are declared BEFORE /{job_id}/* routes so that "bulk"
+# is never accidentally interpreted as a job_id by FastAPI.
+
+@router.post("/bulk/cancel", response_model=BulkJobResponse)
+async def bulk_cancel_jobs(
+    payload: BulkJobRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Cancel multiple discovery jobs. Only pending/running jobs are cancelled."""
+    result = await db.execute(
+        select(DiscoveryJob).where(
+            DiscoveryJob.id.in_(payload.job_ids),
+            DiscoveryJob.org_id == current_user.org_id,
+        )
+    )
+    jobs = {j.id: j for j in result.scalars().all()}
+
+    items: list[BulkJobResultItem] = []
+    succeeded = skipped = not_found = 0
+
+    r = aioredis.from_url(settings.REDIS_URL, decode_responses=True)
+    try:
+        for job_id in payload.job_ids:
+            job = jobs.get(job_id)
+            if job is None:
+                not_found += 1
+                items.append(BulkJobResultItem(
+                    job_id=job_id, status="not_found", detail="Job not found",
+                ))
+                continue
+
+            if job.status not in ("pending", "running"):
+                skipped += 1
+                items.append(BulkJobResultItem(
+                    job_id=job_id,
+                    status="skipped",
+                    detail=f"Status '{job.status}' is not cancellable",
+                ))
+                continue
+
+            await r.set(CANCEL_KEY.format(job_id), "1", ex=300)
+            succeeded += 1
+            items.append(BulkJobResultItem(job_id=job_id, status="ok"))
+    finally:
+        await r.aclose()
+
+    return BulkJobResponse(
+        requested=len(payload.job_ids),
+        succeeded=succeeded,
+        skipped=skipped,
+        not_found=not_found,
+        results=items,
+    )
+
+
+# ── POST /discovery/bulk/delete ──────────────────────────────────────────────
+
+@router.post("/bulk/delete", response_model=BulkJobResponse)
+async def bulk_delete_jobs(
+    payload: BulkJobRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Delete multiple discovery jobs.
+    Running jobs are skipped (cancel them first); other statuses are deleted.
+    """
+    result = await db.execute(
+        select(DiscoveryJob).where(
+            DiscoveryJob.id.in_(payload.job_ids),
+            DiscoveryJob.org_id == current_user.org_id,
+        )
+    )
+    jobs = {j.id: j for j in result.scalars().all()}
+
+    items: list[BulkJobResultItem] = []
+    succeeded = skipped = not_found = 0
+
+    for job_id in payload.job_ids:
+        job = jobs.get(job_id)
+        if job is None:
+            not_found += 1
+            items.append(BulkJobResultItem(
+                job_id=job_id, status="not_found", detail="Job not found",
+            ))
+            continue
+
+        if job.status == "running":
+            skipped += 1
+            items.append(BulkJobResultItem(
+                job_id=job_id,
+                status="skipped",
+                detail="Job is running. Cancel it first.",
+            ))
+            continue
+
+        await db.delete(job)
+        succeeded += 1
+        items.append(BulkJobResultItem(job_id=job_id, status="ok"))
+
+    await db.commit()
+
+    return BulkJobResponse(
+        requested=len(payload.job_ids),
+        succeeded=succeeded,
+        skipped=skipped,
+        not_found=not_found,
+        results=items,
+    )
+
+
 # ── GET /discovery/{job_id} ───────────────────────────────────────────────────
 
 @router.get("/{job_id}", response_model=DiscoveryJobDetail)
@@ -126,9 +242,13 @@ async def get_job(
     )
     hosts = hosts_result.scalars().all()
 
-    detail = DiscoveryJobDetail.model_validate(job)
-    detail.hosts = [DiscoveredHostOut.model_validate(h) for h in hosts]
-    return detail
+    # Build the response without touching `job.hosts` (lazy relationship would
+    # trigger a sync IO call on an async session and raise MissingGreenlet).
+    base = DiscoveryJobOut.model_validate(job)
+    return DiscoveryJobDetail(
+        **base.model_dump(),
+        hosts=[DiscoveredHostOut.model_validate(h) for h in hosts],
+    )
 
 
 # ── GET /discovery/{job_id}/stream  (SSE) ─────────────────────────────────────
@@ -334,10 +454,12 @@ async def delete_job(
 ):
     job = await _get_job_or_404(job_id, current_user.org_id, db)
 
-    if job.status in ("pending", "running"):
+    if job.status == "running":
         raise HTTPException(
             status_code=400,
             detail="Cannot delete a running job. Cancel it first."
         )
 
     await db.delete(job)
+    await db.commit()
+    return None

@@ -10,6 +10,7 @@ class Settings(BaseSettings):
     )
 
     DATABASE_URL: str
+    DB_USE_NULL_POOL: bool = False
     REDIS_URL: str = "redis://localhost:6379/0"
 
     SECRET_KEY: str

@@ -7,6 +7,8 @@ RUN apt-get update && apt-get install -y \
     libpq-dev \
     postgresql-client \
     dos2unix \
+    iputils-ping \
+    iproute2 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
