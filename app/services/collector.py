@@ -314,4 +314,120 @@ def _apply_facts_to_device(device: Device, facts: DeviceFacts) -> None:
     if facts.serial_number:
         device.serial_number = facts.serial_number
     if facts.os_name:
-        devi
+        device.os_name = facts.os_name
+    if facts.os_version:
+        device.os_version = facts.os_version
+    if facts.os_image:
+        device.os_image = facts.os_image
+    if facts.hardware:
+        device.hardware = facts.hardware
+    if facts.uptime:
+        device.uptime = facts.uptime
+    if facts.as_dict():
+        device.facts_updated_at = datetime.now(timezone.utc)
+
+
+def ssh_pull_direct(
+    ip_address: str,
+    port: int,
+    os_type: str | None,
+    username: str,
+    password: str,
+) -> tuple[str, str, DeviceFacts]:
+    """
+    Connect to a device via SSH, auto-detect the OS if unknown, pull the
+    running configuration, and return ``(config_raw, detected_os_type, facts)``.
+
+    Inventory facts (model, serial number, OS version, image, uptime, etc.)
+    are gathered in the same SSH session via :func:`collect_facts`. If
+    fact-collection fails for any reason, an empty :class:`DeviceFacts` is
+    returned — the config pull itself is the primary contract of this
+    function and must not be aborted by ancillary failures.
+
+    This is a *synchronous* / blocking function — callers running inside an
+    async event loop must dispatch it via ``loop.run_in_executor``.
+
+    Raises
+    ------
+    NetmikoAuthenticationException
+        When the credentials are rejected by the device.
+    NetmikoTimeoutException
+        When the device is unreachable or the session times out.
+    """
+    logger.info(
+        f"[SSH] ▶ {ip_address}:{port} | user={username} | os_hint={os_type!r}"
+    )
+
+    # ── 1. Auto-detect OS when not supplied or not in our command map ─────────
+    if not os_type or os_type not in SHOW_RUN_COMMANDS:
+        logger.info(
+            f"[SSH] {ip_address}:{port} | os_hint={os_type!r} not in known map "
+            f"— running SSHDetect"
+        )
+        detect_params = {
+            "device_type": "autodetect",
+            "host": ip_address,
+            "port": port,
+            "username": username,
+            "password": password,
+            "timeout": 30,
+        }
+        try:
+            guesser = SSHDetect(**detect_params)
+            detected = guesser.autodetect()
+            logger.info(
+                f"[SSH] SSHDetect raw result for {ip_address}: {detected!r}"
+            )
+            if detected and detected in SHOW_RUN_COMMANDS:
+                os_type = detected
+                logger.info(f"[SSH] {ip_address} → using detected OS: {os_type!r}")
+            else:
+                os_type = _DEFAULT_OS
+                logger.warning(
+                    f"[SSH] {ip_address} | SSHDetect returned {detected!r} "
+                    f"(not in known map) → falling back to {_DEFAULT_OS!r}"
+                )
+        except (NetmikoAuthenticationException, NetmikoTimeoutException):
+            raise
+        except Exception as exc:
+            logger.warning(
+                f"[SSH] {ip_address}:{port} | SSHDetect failed → "
+                f"falling back to {_DEFAULT_OS!r}. Reason: {exc}"
+            )
+            os_type = _DEFAULT_OS
+    else:
+        logger.info(f"[SSH] {ip_address}:{port} | using provided OS: {os_type!r}")
+
+    # ── 2. Pull config ────────────────────────────────────────────────────────
+    command = SHOW_RUN_COMMANDS.get(os_type, "show running-config")
+    logger.info(
+        f"[SSH] {ip_address}:{port} | os={os_type!r} | "
+        f"running command: {command!r}"
+    )
+
+    connection_params = {
+        "device_type": os_type,
+        "host": ip_address,
+        "port": port,
+        "username": username,
+        "password": password,
+        "timeout": 30,
+        "session_log": None,
+    }
+
+    with ConnectHandler(**connection_params) as conn:
+        logger.info(f"[SSH] {ip_address}:{port} | connection established ✓")
+        output = conn.send_command(command, read_timeout=60)
+        try:
+            facts = collect_facts(conn, os_type)
+        except Exception as exc:
+            logger.warning(
+                f"[FACTS] {ip_address}:{port} | inventory collection failed: {exc}"
+            )
+            facts = DeviceFacts()
+
+    logger.info(
+        f"[SSH] {ip_address}:{port} | ✓ config pulled | "
+        f"{len(output)} chars | os={os_type!r} | facts={facts.as_dict()}"
+    )
+    return output, os_type, facts
