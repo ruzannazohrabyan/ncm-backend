@@ -20,6 +20,11 @@ class Settings(BaseSettings):
 
     ENCRYPTION_KEY: str
 
+    # Comma-separated list of allowed origins, e.g.:
+    # CORS_ORIGINS=http://localhost:5173,http://myserver.local:3000
+    # Leave empty to allow ALL origins (no credentials).
+    CORS_ORIGINS: str = ""
+
     TELEGRAM_BOT_TOKEN: Optional[str] = None
     SMTP_HOST: Optional[str] = None
     SMTP_PORT: int = 587
