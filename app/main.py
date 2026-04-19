@@ -1,5 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from app.core.config import settings
 from app.routers import auth, devices, snapshots, alerts, discovery
 
 app = FastAPI(
@@ -10,10 +11,17 @@ app = FastAPI(
     redoc_url="/api/redoc",
 )
 
+# Build origin list from env var.
+# If CORS_ORIGINS is empty → allow all origins (wildcard).
+# If set → allow only those exact origins and enable credentials.
+_raw_origins = [o.strip() for o in settings.CORS_ORIGINS.split(",") if o.strip()]
+_allow_origins = _raw_origins if _raw_origins else ["*"]
+_allow_credentials = bool(_raw_origins)   # credentials only when origins are explicit
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=_allow_origins,
+    allow_credentials=_allow_credentials,
     allow_methods=["*"],
     allow_headers=["*"],
 )
