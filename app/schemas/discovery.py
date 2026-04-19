@@ -1,7 +1,7 @@
 from __future__ import annotations
 from datetime import datetime
 from typing import Optional
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, field_validator, model_validator
 import ipaddress
 
 
@@ -108,3 +108,37 @@ class BulkJobResponse(BaseModel):
     skipped: int
     not_found: int
     results: list[BulkJobResultItem]
+
+
+# ── SSH config pull ────────────────────────────────────────────────────────────
+
+class HostSshPullRequest(BaseModel):
+    """
+    Pull the running config from a discovered host via SSH.
+
+    Either ``credential_id`` (an existing saved credential) OR
+    ``username`` + ``password`` must be provided. ``port`` defaults to 22.
+    """
+    credential_id: Optional[str] = None
+    username: Optional[str] = None
+    password: Optional[str] = None
+    port: int = 22
+
+    @model_validator(mode="after")
+    def check_credential_or_manual(self) -> "HostSshPullRequest":
+        has_saved  = self.credential_id is not None
+        has_manual = self.username is not None and self.password is not None
+        if not has_saved and not has_manual:
+            raise ValueError(
+                "Provide either 'credential_id' or both 'username' and 'password'"
+            )
+        return self
+
+
+class HostSshPullResult(BaseModel):
+    device_id: str
+    snapshot_id: str
+    config_hash: str
+    config_preview: str      # first 500 characters of the pulled config
+    os_type: str
+    newly_imported: bool     # True when the host was not yet imported before this call
