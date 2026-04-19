@@ -7,9 +7,12 @@ class SnapshotOut(BaseModel):
     id: str
     device_id: str
     hash: str
+    config_type: str  # "running" | "startup"
     trigger_type: str
     captured_at: datetime
     triggered_by: Optional[str]
+    is_latest: bool
+    synced_at: Optional[datetime]
 
     model_config = {"from_attributes": True}
 

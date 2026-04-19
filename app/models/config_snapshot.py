@@ -14,8 +14,15 @@ class ConfigSnapshot(Base):
 
     config_raw: Mapped[str] = mapped_column(Text, nullable=False)
     hash: Mapped[str] = mapped_column(String(64), nullable=False)        # SHA-256
+    config_type: Mapped[str] = mapped_column(String(50), default="running")  # running | startup
     trigger_type: Mapped[str] = mapped_column(String(50), default="scheduled")  # scheduled | manual | webhook
     captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    # Track if this is the latest snapshot of its type for the device
+    is_latest: Mapped[bool] = mapped_column(default=True)
+
+    # Track when running and startup configs were last in sync
+    synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     device: Mapped["Device"] = relationship("Device", back_populates="snapshots")
     triggered_by_user: Mapped["User"] = relationship("User", foreign_keys=[triggered_by])

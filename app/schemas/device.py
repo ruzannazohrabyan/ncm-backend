@@ -24,6 +24,14 @@ class DeviceUpdate(BaseModel):
     credential_id: Optional[str] = None
     is_active: Optional[bool] = None
     backup_interval_minutes: Optional[int] = None
+    # Inventory facts — usually populated automatically, but exposed here so
+    # operators can override / correct values manually.
+    serial_number: Optional[str] = None
+    os_name: Optional[str] = None
+    os_version: Optional[str] = None
+    os_image: Optional[str] = None
+    hardware: Optional[str] = None
+    uptime: Optional[str] = None
 
 
 class DeviceOut(BaseModel):
@@ -35,6 +43,13 @@ class DeviceOut(BaseModel):
     vendor: Optional[str]
     model: Optional[str]
     os_type: Optional[str]
+    serial_number: Optional[str] = None
+    os_name: Optional[str] = None
+    os_version: Optional[str] = None
+    os_image: Optional[str] = None
+    hardware: Optional[str] = None
+    uptime: Optional[str] = None
+    facts_updated_at: Optional[datetime] = None
     is_active: bool
     backup_interval_minutes: int
     last_seen: Optional[datetime]
