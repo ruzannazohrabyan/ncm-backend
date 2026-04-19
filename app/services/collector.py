@@ -11,6 +11,7 @@ from app.models.device import Device
 from app.models.credential import Credential
 from app.models.config_snapshot import ConfigSnapshot
 from app.models.change_event import ChangeEvent, AlertRule
+from app.services.device_facts import DeviceFacts, collect_facts
 from app.services.diff_engine import compute_diff
 from app.services.notifier import send_alert
 
@@ -23,6 +24,15 @@ SHOW_RUN_COMMANDS = {
     "junos": "show configuration | display text",
     "routeros": "export compact",
     "mikrotik_routeros": "export compact",
+}
+
+SHOW_STARTUP_COMMANDS = {
+    "cisco_ios": "show startup-config",
+    "cisco_xe": "show startup-config",
+    "cisco_nxos": "show startup-config",
+    "junos": "show system commit",  # Junos doesn't have startup-config; show system commit is equivalent
+    "routeros": None,  # RouterOS doesn't have separate startup-config
+    "mikrotik_routeros": None,
 }
 
 # Fallback when SSHDetect returns an unrecognised type or None
@@ -49,35 +59,63 @@ async def pull_config(device_id: str, triggered_by: str | None = None) -> bool:
                 logger.error(f"No credential for device {device_id}")
                 return False
 
-            config_raw = _ssh_pull(device, cred)
-            config_hash = hashlib.sha256(config_raw.encode()).hexdigest()
+            # Pull both running and startup configs
+            running_config, startup_config, facts = _ssh_pull(device, cred)
+            running_hash = hashlib.sha256(running_config.encode()).hexdigest()
+            startup_hash = hashlib.sha256(startup_config.encode()).hexdigest() if startup_config else None
 
-            last_snapshot_result = await db.execute(
+            _apply_facts_to_device(device, facts)
+
+            # Mark previous snapshots as not latest
+            await db.execute(
                 select(ConfigSnapshot)
-                .where(ConfigSnapshot.device_id == device_id)
+                .where(ConfigSnapshot.device_id == device_id, ConfigSnapshot.is_latest == True)
+                .update({ConfigSnapshot.is_latest: False})
+            )
+
+            # Get last snapshots for change detection
+            last_running_result = await db.execute(
+                select(ConfigSnapshot)
+                .where(
+                    ConfigSnapshot.device_id == device_id,
+                    ConfigSnapshot.config_type == "running",
+                )
                 .order_by(ConfigSnapshot.captured_at.desc())
                 .limit(1)
             )
-            last_snapshot = last_snapshot_result.scalar_one_or_none()
+            last_running = last_running_result.scalar_one_or_none()
 
-            snapshot = ConfigSnapshot(
+            last_startup_result = await db.execute(
+                select(ConfigSnapshot)
+                .where(
+                    ConfigSnapshot.device_id == device_id,
+                    ConfigSnapshot.config_type == "startup",
+                )
+                .order_by(ConfigSnapshot.captured_at.desc())
+                .limit(1)
+            )
+            last_startup = last_startup_result.scalar_one_or_none()
+
+            # Create running-config snapshot
+            running_snapshot = ConfigSnapshot(
                 device_id=device_id,
                 triggered_by=triggered_by,
-                config_raw=config_raw,
-                hash=config_hash,
+                config_raw=running_config,
+                hash=running_hash,
+                config_type="running",
                 trigger_type="manual" if triggered_by else "scheduled",
+                is_latest=True,
             )
-            db.add(snapshot)
+            db.add(running_snapshot)
             await db.flush()
 
-            device.last_seen = datetime.now(timezone.utc)
-
-            if last_snapshot and last_snapshot.hash != config_hash:
-                diff_text = compute_diff(last_snapshot.config_raw, config_raw)
+            # Detect changes in running-config
+            if last_running and last_running.hash != running_hash:
+                diff_text = compute_diff(last_running.config_raw, running_config)
                 change = ChangeEvent(
                     device_id=device_id,
-                    snapshot_before_id=last_snapshot.id,
-                    snapshot_after_id=snapshot.id,
+                    snapshot_before_id=last_running.id,
+                    snapshot_after_id=running_snapshot.id,
                     diff_text=diff_text,
                     severity="warning",
                 )
@@ -96,6 +134,43 @@ async def pull_config(device_id: str, triggered_by: str | None = None) -> bool:
 
                 change.notified = True
 
+            # Create startup-config snapshot if available
+            if startup_config:
+                startup_snapshot = ConfigSnapshot(
+                    device_id=device_id,
+                    triggered_by=triggered_by,
+                    config_raw=startup_config,
+                    hash=startup_hash,
+                    config_type="startup",
+                    trigger_type="manual" if triggered_by else "scheduled",
+                    is_latest=True,
+                )
+                db.add(startup_snapshot)
+                await db.flush()
+
+                # Detect changes in startup-config
+                if last_startup and last_startup.hash != startup_hash:
+                    diff_text = compute_diff(last_startup.config_raw, startup_config)
+                    change = ChangeEvent(
+                        device_id=device_id,
+                        snapshot_before_id=last_startup.id,
+                        snapshot_after_id=startup_snapshot.id,
+                        diff_text=diff_text,
+                        severity="info",  # Startup changes are informational
+                    )
+                    db.add(change)
+                    await db.flush()
+
+                # Check if running and startup are in sync
+                if running_hash == startup_hash:
+                    now = datetime.now(timezone.utc)
+                    running_snapshot.synced_at = now
+                    startup_snapshot.synced_at = now
+                    logger.info(f"Device {device.hostname}: running-config and startup-config are in sync")
+                else:
+                    logger.warning(f"Device {device.hostname}: OUT-OF-SYNC (running != startup)")
+
+            device.last_seen = datetime.now(timezone.utc)
             await db.commit()
             logger.info(f"Config pulled for device {device.hostname}")
             return True
@@ -112,9 +187,81 @@ async def pull_config(device_id: str, triggered_by: str | None = None) -> bool:
             return False
 
 
-def _ssh_pull(device: Device, cred: Credential) -> str:
+async def refresh_device_facts(device_id: str) -> DeviceFacts | None:
+    """
+    Open an SSH session to the given device, harvest inventory facts, persist
+    them, and return the collected :class:`DeviceFacts`.
+
+    Returns ``None`` if the device is missing/inactive, has no credential, or
+    if the SSH session fails. Does **not** pull the running-config — use
+    :func:`pull_config` for that.
+    """
+    async with AsyncSessionLocal() as db:
+        try:
+            result = await db.execute(select(Device).where(Device.id == device_id))
+            device = result.scalar_one_or_none()
+            if not device or not device.is_active:
+                logger.warning(f"[FACTS] Device {device_id} not found or inactive")
+                return None
+
+            if not device.credential_id:
+                logger.error(f"[FACTS] No credential for device {device_id}")
+                return None
+
+            cred_result = await db.execute(
+                select(Credential).where(Credential.id == device.credential_id)
+            )
+            cred = cred_result.scalar_one_or_none()
+            if not cred:
+                logger.error(f"[FACTS] Credential {device.credential_id} missing")
+                return None
+
+            os_type = device.os_type or _DEFAULT_OS
+            connection_params = {
+                "device_type": os_type,
+                "host": device.ip_address,
+                "port": device.port,
+                "username": cred.username,
+                "password": decrypt_secret(cred.encrypted_password),
+                "timeout": 30,
+                "session_log": None,
+            }
+
+            with ConnectHandler(**connection_params) as conn:
+                facts = collect_facts(conn, os_type)
+
+            _apply_facts_to_device(device, facts)
+            device.last_seen = datetime.now(timezone.utc)
+            await db.commit()
+            return facts
+
+        except NetmikoAuthenticationException:
+            logger.error(f"[FACTS] Auth failed for device {device_id}")
+            return None
+        except NetmikoTimeoutException:
+            logger.error(f"[FACTS] Timeout connecting to device {device_id}")
+            return None
+        except Exception as exc:
+            logger.exception(f"[FACTS] Unexpected error for device {device_id}: {exc}")
+            await db.rollback()
+            return None
+
+
+def _ssh_pull(device: Device, cred: Credential) -> tuple[str, str | None, DeviceFacts]:
+    """
+    Connect to ``device`` and return ``(running_config, startup_config, facts)``.
+
+    Inventory facts are harvested in the same SSH session as the config pull
+    to avoid the cost of a second login.
+
+    Returns:
+        - running_config: The current running configuration
+        - startup_config: The startup configuration (None if not supported by device OS)
+        - facts: DeviceFacts collected from the device
+    """
     os_type = device.os_type or _DEFAULT_OS
-    command = SHOW_RUN_COMMANDS.get(os_type, "show running-config")
+    run_command = SHOW_RUN_COMMANDS.get(os_type, "show running-config")
+    startup_command = SHOW_STARTUP_COMMANDS.get(os_type)
 
     connection_params = {
         "device_type": os_type,
@@ -127,99 +274,44 @@ def _ssh_pull(device: Device, cred: Credential) -> str:
     }
 
     with ConnectHandler(**connection_params) as conn:
-        output = conn.send_command(command, read_timeout=60)
+        # Pull running-config
+        running_config = conn.send_command(run_command, read_timeout=60)
 
-    return output
-
-
-def ssh_pull_direct(
-    ip_address: str,
-    port: int,
-    os_type: str | None,
-    username: str,
-    password: str,
-) -> tuple[str, str]:
-    """
-    Connect to a device via SSH, auto-detect the OS if unknown, pull the
-    running configuration, and return ``(config_raw, detected_os_type)``.
-
-    This is a *synchronous* / blocking function — callers running inside an
-    async event loop must dispatch it via ``loop.run_in_executor``.
-
-    Raises
-    ------
-    NetmikoAuthenticationException
-        When the credentials are rejected by the device.
-    NetmikoTimeoutException
-        When the device is unreachable or the session times out.
-    """
-    logger.info(
-        f"[SSH] ▶ {ip_address}:{port} | user={username} | os_hint={os_type!r}"
-    )
-
-    # ── 1. Auto-detect OS when not supplied or not in our command map ─────────
-    if not os_type or os_type not in SHOW_RUN_COMMANDS:
-        logger.info(
-            f"[SSH] {ip_address}:{port} | os_hint={os_type!r} not in known map "
-            f"— running SSHDetect"
-        )
-        detect_params = {
-            "device_type": "autodetect",
-            "host": ip_address,
-            "port": port,
-            "username": username,
-            "password": password,
-            "timeout": 30,
-        }
-        try:
-            guesser = SSHDetect(**detect_params)
-            detected = guesser.autodetect()
-            logger.info(
-                f"[SSH] SSHDetect raw result for {ip_address}: {detected!r}"
-            )
-            if detected and detected in SHOW_RUN_COMMANDS:
-                os_type = detected
-                logger.info(f"[SSH] {ip_address} → using detected OS: {os_type!r}")
-            else:
-                os_type = _DEFAULT_OS
+        # Pull startup-config if supported
+        startup_config = None
+        if startup_command:
+            try:
+                startup_config = conn.send_command(startup_command, read_timeout=60)
+            except Exception as exc:
                 logger.warning(
-                    f"[SSH] {ip_address} | SSHDetect returned {detected!r} "
-                    f"(not in known map) → falling back to {_DEFAULT_OS!r}"
+                    f"[CONFIG] Failed to get startup-config for {device.ip_address}: {exc}"
                 )
-        except (NetmikoAuthenticationException, NetmikoTimeoutException):
-            raise
+
+        # Collect inventory facts
+        try:
+            facts = collect_facts(conn, os_type)
         except Exception as exc:
             logger.warning(
-                f"[SSH] {ip_address}:{port} | SSHDetect failed → "
-                f"falling back to {_DEFAULT_OS!r}. Reason: {exc}"
+                f"[FACTS] Failed to collect inventory for {device.ip_address}: {exc}"
             )
-            os_type = _DEFAULT_OS
-    else:
-        logger.info(f"[SSH] {ip_address}:{port} | using provided OS: {os_type!r}")
+            facts = DeviceFacts()
 
-    # ── 2. Pull config ────────────────────────────────────────────────────────
-    command = SHOW_RUN_COMMANDS.get(os_type, "show running-config")
-    logger.info(
-        f"[SSH] {ip_address}:{port} | os={os_type!r} | "
-        f"running command: {command!r}"
-    )
+    return running_config, startup_config, facts
 
-    connection_params = {
-        "device_type": os_type,
-        "host": ip_address,
-        "port": port,
-        "username": username,
-        "password": password,
-        "timeout": 30,
-        "session_log": None,
-    }
 
-    with ConnectHandler(**connection_params) as conn:
-        logger.info(f"[SSH] {ip_address}:{port} | connection established ✓")
-        output = conn.send_command(command, read_timeout=60)
+def _apply_facts_to_device(device: Device, facts: DeviceFacts) -> None:
+    """
+    Copy non-empty :class:`DeviceFacts` fields onto a :class:`Device` row.
 
-    logger.info(
-        f"[SSH] {ip_address}:{port} | ✓ config pulled | "
-        f"{len(output)} chars | os={os_type!r}"
-    )
-    return output, os_type
+    Existing values are overwritten only when a fresh non-``None`` value was
+    parsed — this keeps the previous reading intact if the new poll could
+    not parse a particular field.
+    """
+    if facts.vendor and not device.vendor:
+        device.vendor = facts.vendor
+    if facts.model:
+        device.model = facts.model
+    if facts.serial_number:
+        device.serial_number = facts.serial_number
+    if facts.os_name:
+        devi

@@ -8,7 +8,7 @@ from app.models.device import Device
 from app.models.credential import Credential
 from app.models.user import User
 from app.schemas.device import DeviceCreate, DeviceUpdate, DeviceOut, CredentialCreate, CredentialOut
-from app.services.collector import pull_config
+from app.services.collector import pull_config, refresh_device_facts
 
 router = APIRouter(prefix="/devices", tags=["devices"])
 
@@ -149,3 +149,35 @@ async def manual_pull(
 
     background_tasks.add_task(pull_config, device_id=device_id, triggered_by=current_user.id)
     return {"message": "Backup triggered", "device_id": device_id}
+
+
+@router.post("/{device_id}/refresh-facts", response_model=DeviceOut)
+async def refresh_facts(
+    device_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Re-collect inventory facts (model, serial, OS version, image, uptime, ...)
+    for a device by SSH-ing in and running ``show version`` (or the platform
+    equivalent). Returns the freshly updated device.
+    """
+    result = await db.execute(
+        select(Device).where(Device.id == device_id, Device.org_id == current_user.org_id)
+    )
+    device = result.scalar_one_or_none()
+    if not device:
+        raise HTTPException(status_code=404, detail="Device not found")
+
+    facts = await refresh_device_facts(device_id)
+    if facts is None:
+        raise HTTPException(
+            status_code=502,
+            detail="Could not refresh device facts — check connectivity, credentials and OS type.",
+        )
+
+    # Re-fetch the now-updated row so the response reflects the new values.
+    result = await db.execute(
+        select(Device).where(Device.id == device_id, Device.org_id == current_user.org_id)
+    )
+    return result.scalar_one()

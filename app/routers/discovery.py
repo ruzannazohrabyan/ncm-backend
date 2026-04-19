@@ -57,7 +57,7 @@ from app.schemas.discovery import (
     ImportedDeviceOut,
     ScanRequest,
 )
-from app.services.collector import ssh_pull_direct
+from app.services.collector import _apply_facts_to_device, ssh_pull_direct
 from app.workers.discovery_task import CANCEL_KEY, run_discovery
 
 logger = logging.getLogger(__name__)
@@ -321,7 +321,7 @@ async def ssh_pull_host(
     )
     loop = asyncio.get_event_loop()
     try:
-        config_raw, detected_os = await loop.run_in_executor(
+        config_raw, detected_os, facts = await loop.run_in_executor(
             None,
             lambda: ssh_pull_direct(
                 ip_address=host.ip_address,
@@ -406,6 +406,9 @@ async def ssh_pull_host(
             logger.info(
                 f"[SSH-PULL] Updated device os_type → {detected_os!r}"
             )
+
+    # Apply harvested inventory facts (model, serial, OS version, etc.)
+    _apply_facts_to_device(device, facts)  # type: ignore[arg-type]
 
     # ── 5. Save ConfigSnapshot ────────────────────────────────────────────────
     snapshot = ConfigSnapshot(

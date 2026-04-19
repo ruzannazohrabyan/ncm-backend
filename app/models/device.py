@@ -19,6 +19,16 @@ class Device(Base):
     model: Mapped[str] = mapped_column(String(100), nullable=True)
     os_type: Mapped[str] = mapped_column(String(100), nullable=True)  # cisco_ios, junos, routeros
 
+    # ── Inventory facts (populated from `show version` / equivalent) ──────────
+    # These are best-effort and may be NULL until the device has been polled.
+    serial_number: Mapped[str] = mapped_column(String(100), nullable=True)
+    os_name: Mapped[str] = mapped_column(String(100), nullable=True)        # e.g. "IOS", "IOS-XE", "NX-OS", "JUNOS", "RouterOS"
+    os_version: Mapped[str] = mapped_column(String(100), nullable=True)     # e.g. "15.2(4)M7", "17.09.04a"
+    os_image: Mapped[str] = mapped_column(String(255), nullable=True)       # e.g. "c2900-universalk9-mz.SPA.151-4.M4.bin"
+    hardware: Mapped[str] = mapped_column(String(255), nullable=True)       # e.g. "CISCO2911/K9", chassis description
+    uptime: Mapped[str] = mapped_column(String(255), nullable=True)         # human-readable, as reported by the device
+    facts_updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=True)
+
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     backup_interval_minutes: Mapped[int] = mapped_column(Integer, default=60)
     last_seen: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=True)
