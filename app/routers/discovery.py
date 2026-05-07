@@ -32,7 +32,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from jose import JWTError
 from netmiko import NetmikoAuthenticationException, NetmikoTimeoutException
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -320,7 +320,13 @@ async def ssh_pull_host(
     )
     loop = asyncio.get_event_loop()
     try:
-        config_raw, detected_os, facts = await loop.run_in_executor(
+        (
+            config_raw,
+            startup_raw,
+            detected_os,
+            facts,
+            startup_pull_failed,
+        ) = await loop.run_in_executor(
             None,
             lambda: ssh_pull_direct(
                 ip_address=host.ip_address,
@@ -348,9 +354,19 @@ async def ssh_pull_host(
         raise HTTPException(status_code=500, detail=f"SSH error: {exc}")
 
     config_hash = hashlib.sha256(config_raw.encode()).hexdigest()
+    startup_hash = (
+        hashlib.sha256(startup_raw.encode()).hexdigest() if startup_raw else None
+    )
+    # "Supported" = the platform exposes a separate startup-config concept.
+    # We treat a successful pull OR a failed-but-attempted pull both as
+    # "supported"; only platforms whose mapping is None are unsupported.
+    startup_supported = bool(startup_raw) or startup_pull_failed
     logger.info(
         f"[SSH-PULL] ✓ Config received | ip={host.ip_address} | "
-        f"os={detected_os!r} | chars={len(config_raw)} | hash={config_hash[:12]}…"
+        f"os={detected_os!r} | running_chars={len(config_raw)} | "
+        f"running_hash={config_hash[:12]}… | "
+        f"startup={'present' if startup_raw else ('FAILED' if startup_pull_failed else 'n/a')}"
+        + (f" | startup_hash={startup_hash[:12]}…" if startup_hash else "")
     )
 
     # ── 4. Get or create Device record ────────────────────────────────────────
@@ -409,16 +425,61 @@ async def ssh_pull_host(
     # Apply harvested inventory facts (model, serial, OS version, etc.)
     _apply_facts_to_device(device, facts)  # type: ignore[arg-type]
 
-    # ── 5. Save ConfigSnapshot ────────────────────────────────────────────────
+    # ── 5. Save ConfigSnapshots (running + optional startup) ──────────────────
+    # Demote any previous "running" snapshot for this device, then add the new
+    # one. We scope the bulk update to config_type="running" so a missing
+    # startup pull doesn't disturb the previous startup snapshot's flag.
+    await db.execute(
+        update(ConfigSnapshot)
+        .where(
+            ConfigSnapshot.device_id == device.id,    # type: ignore[union-attr]
+            ConfigSnapshot.config_type == "running",
+            ConfigSnapshot.is_latest == True,
+        )
+        .values(is_latest=False)
+    )
     snapshot = ConfigSnapshot(
         device_id=device.id,    # type: ignore[union-attr]
         triggered_by=current_user.id,
         config_raw=config_raw,
         hash=config_hash,
+        config_type="running",
         trigger_type="manual",
+        is_latest=True,
     )
     db.add(snapshot)
     await db.flush()
+
+    startup_snapshot: ConfigSnapshot | None = None
+    in_sync: bool | None = None
+
+    if startup_raw is not None:
+        await db.execute(
+            update(ConfigSnapshot)
+            .where(
+                ConfigSnapshot.device_id == device.id,    # type: ignore[union-attr]
+                ConfigSnapshot.config_type == "startup",
+                ConfigSnapshot.is_latest == True,
+            )
+            .values(is_latest=False)
+        )
+        startup_snapshot = ConfigSnapshot(
+            device_id=device.id,    # type: ignore[union-attr]
+            triggered_by=current_user.id,
+            config_raw=startup_raw,
+            hash=startup_hash,    # type: ignore[arg-type]
+            config_type="startup",
+            trigger_type="manual",
+            is_latest=True,
+        )
+        db.add(startup_snapshot)
+        await db.flush()
+
+        in_sync = config_hash == startup_hash
+        if in_sync:
+            now = datetime.now(timezone.utc)
+            snapshot.synced_at = now
+            startup_snapshot.synced_at = now
 
     device.last_seen = datetime.now(timezone.utc)  # type: ignore[union-attr]
 
@@ -426,7 +487,9 @@ async def ssh_pull_host(
 
     logger.info(
         f"[SSH-PULL] ✓ Done | ip={host.ip_address} | device_id={device.id} | "  # type: ignore[union-attr]
-        f"snapshot_id={snapshot.id} | newly_imported={newly_imported}"
+        f"running_snapshot={snapshot.id} | "
+        f"startup_snapshot={startup_snapshot.id if startup_snapshot else '-'} | "
+        f"in_sync={in_sync} | newly_imported={newly_imported}"
     )
 
     return HostSshPullResult(
@@ -436,6 +499,12 @@ async def ssh_pull_host(
         config_preview=config_raw[:500],
         os_type=detected_os,
         newly_imported=newly_imported,
+        startup_supported=startup_supported,
+        startup_pull_failed=startup_pull_failed,
+        startup_snapshot_id=startup_snapshot.id if startup_snapshot else None,
+        startup_hash=startup_hash,
+        startup_preview=startup_raw[:500] if startup_raw else None,
+        in_sync=in_sync,
     )
 
 

@@ -137,8 +137,26 @@ class HostSshPullRequest(BaseModel):
 
 class HostSshPullResult(BaseModel):
     device_id: str
-    snapshot_id: str
-    config_hash: str
-    config_preview: str      # first 500 characters of the pulled config
+    snapshot_id: str             # running-config snapshot id
+    config_hash: str             # running-config sha256 (kept for backward compat)
+    config_preview: str          # first 500 characters of the running-config
     os_type: str
-    newly_imported: bool     # True when the host was not yet imported before this call
+    newly_imported: bool         # True when the host was not yet imported before this call
+
+    # ── Startup-config (optional, depending on platform support) ──────────────
+    startup_supported: bool = False
+    """Whether this device's OS exposes a separate startup-config concept."""
+
+    startup_pull_failed: bool = False
+    """True if startup-config was supported but the pull command errored out."""
+
+    startup_snapshot_id: Optional[str] = None
+    startup_hash: Optional[str] = None
+    startup_preview: Optional[str] = None  # first 500 chars
+
+    in_sync: Optional[bool] = None
+    """
+    True  → running-config and startup-config hashes match.
+    False → they differ (device has unsaved running changes).
+    None  → startup-config not supported / not available, so n/a.
+    """
