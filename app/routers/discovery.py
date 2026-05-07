@@ -64,7 +64,6 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/discovery", tags=["discovery"])
 
-
 # ── helpers ───────────────────────────────────────────────────────────────────
 
 async def _get_job_or_404(job_id: str, org_id: str, db: AsyncSession) -> DiscoveryJob:

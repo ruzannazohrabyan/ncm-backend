@@ -12,7 +12,6 @@ from app.services.collector import pull_config, refresh_device_facts
 
 router = APIRouter(prefix="/devices", tags=["devices"])
 
-
 # ── Credentials ──────────────────────────────────────────────────────────────
 
 @router.get("/credentials", response_model=list[CredentialOut])
