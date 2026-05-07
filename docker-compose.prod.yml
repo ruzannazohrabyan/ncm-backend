@@ -1,0 +1,14 @@
+version: "3.9"
+
+# Production deployment — pulls pre-built image from Docker Hub.
+# Usage: docker-compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+
+services:
+  api:
+    image: ${DOCKER_IMAGE:?DOCKER_IMAGE must be set, e.g. ruzo/ncm-backend:pr-8-0f15053}
+
+  worker:
+    image: ${DOCKER_IMAGE:?DOCKER_IMAGE must be set, e.g. ruzo/ncm-backend:pr-8-0f15053}
+
+  beat:
+    image: ${DOCKER_IMAGE:?DOCKER_IMAGE must be set, e.g. ruzo/ncm-backend:pr-8-0f15053}
