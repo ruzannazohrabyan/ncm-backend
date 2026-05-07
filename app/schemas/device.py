@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 from datetime import datetime
 from typing import Optional
 
@@ -74,3 +74,58 @@ class CredentialOut(BaseModel):
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+# ── Manual / on-demand pull from the Devices page ─────────────────────────────
+
+class DevicePullRequest(BaseModel):
+    """
+    Body for POST /devices/{device_id}/pull.
+
+    All fields are optional. Credentials are resolved with this priority:
+
+      1. ``credential_id`` from the body, if provided.
+      2. Inline ``username`` + ``password`` from the body, if both provided.
+      3. The device's saved ``credential_id``, if set.
+      4. Otherwise the API returns HTTP 400 with
+         ``{"code": "credentials_required", ...}`` so the UI can prompt for
+         manual credentials.
+
+    ``port`` overrides the device's stored port for this pull only — it is not
+    persisted back onto the Device row.
+    """
+    credential_id: Optional[str] = None
+    username: Optional[str] = None
+    password: Optional[str] = None
+    port: Optional[int] = None
+
+    @model_validator(mode="after")
+    def validate_manual_pair(self) -> "DevicePullRequest":
+        # If one of username/password is provided, the other is required.
+        if (self.username is None) != (self.password is None):
+            raise ValueError(
+                "Both 'username' and 'password' must be provided together for manual credentials"
+            )
+        # If the caller passed both a saved credential_id AND inline creds,
+        # we accept it but credential_id wins (documented above).
+        return self
+
+
+class DevicePullResult(BaseModel):
+    """Result of POST /devices/{device_id}/pull. Mirrors HostSshPullResult shape."""
+    device_id: str
+    detected_os: str
+
+    # Running config (always present on success)
+    snapshot_id: str
+    config_hash: str
+    config_preview: str          # first 500 chars
+    change_event_id: Optional[str] = None  # populated when running-config changed
+
+    # Startup config (optional, depends on platform support)
+    startup_supported: bool = False
+    startup_pull_failed: bool = False
+    startup_snapshot_id: Optional[str] = None
+    startup_hash: Optional[str] = None
+    startup_preview: Optional[str] = None
+    in_sync: Optional[bool] = None

@@ -17,16 +17,24 @@ router = APIRouter(tags=["snapshots"])
 async def list_snapshots(
     device_id: str,
     limit: int = Query(default=50, le=200),
+    config_type: str | None = Query(
+        default=None,
+        description="Filter by snapshot type: 'running' or 'startup'. Omit for both.",
+        pattern="^(running|startup)$",
+    ),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     device = await _get_device_or_404(device_id, current_user.org_id, db)
-    result = await db.execute(
+    stmt = (
         select(ConfigSnapshot)
         .where(ConfigSnapshot.device_id == device.id)
         .order_by(ConfigSnapshot.captured_at.desc())
         .limit(limit)
     )
+    if config_type is not None:
+        stmt = stmt.where(ConfigSnapshot.config_type == config_type)
+    result = await db.execute(stmt)
     return result.scalars().all()
 
 

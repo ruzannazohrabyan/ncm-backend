@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from app.core.database import get_db
@@ -7,7 +7,15 @@ from app.core.security import encrypt_secret
 from app.models.device import Device
 from app.models.credential import Credential
 from app.models.user import User
-from app.schemas.device import DeviceCreate, DeviceUpdate, DeviceOut, CredentialCreate, CredentialOut
+from app.schemas.device import (
+    DeviceCreate,
+    DeviceUpdate,
+    DeviceOut,
+    CredentialCreate,
+    CredentialOut,
+    DevicePullRequest,
+    DevicePullResult,
+)
 from app.services.collector import pull_config, refresh_device_facts
 
 router = APIRouter(prefix="/devices", tags=["devices"])
@@ -132,13 +140,31 @@ async def delete_device(
     await db.delete(device)
 
 
-@router.post("/{device_id}/pull", status_code=202)
+@router.post("/{device_id}/pull", response_model=DevicePullResult)
 async def manual_pull(
     device_id: str,
-    background_tasks: BackgroundTasks,
+    payload: DevicePullRequest | None = None,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    """
+    Pull the running- (and startup-, where supported) config for a device
+    on demand.
+
+    The endpoint runs the pull *synchronously* and returns a rich result,
+    matching the shape the discovery SSH-pull endpoint uses. This lets the UI
+    show snapshot ids, hashes, previews, and the running⇄startup ``in_sync``
+    flag immediately after the action.
+
+    Credential resolution priority:
+
+      1. ``payload.credential_id``                  – an existing saved credential
+      2. ``payload.username`` + ``payload.password`` – inline manual credentials
+      3. ``device.credential_id``                   – the device's saved credential
+      4. None of the above → HTTP 400 with
+         ``{"code": "credentials_required", ...}`` so the UI can prompt the
+         operator to enter credentials manually and retry the same endpoint.
+    """
     result = await db.execute(
         select(Device).where(Device.id == device_id, Device.org_id == current_user.org_id)
     )
@@ -146,8 +172,69 @@ async def manual_pull(
     if not device:
         raise HTTPException(status_code=404, detail="Device not found")
 
-    background_tasks.add_task(pull_config, device_id=device_id, triggered_by=current_user.id)
-    return {"message": "Backup triggered", "device_id": device_id}
+    body = payload or DevicePullRequest()
+
+    # If the caller passed a saved credential_id, verify it belongs to this org
+    # before handing it down to `pull_config` (which doesn't know about orgs).
+    if body.credential_id:
+        cred_check = await db.execute(
+            select(Credential).where(
+                Credential.id == body.credential_id,
+                Credential.org_id == current_user.org_id,
+            )
+        )
+        if cred_check.scalar_one_or_none() is None:
+            raise HTTPException(
+                status_code=404,
+                detail="Credential not found or not accessible to your organization",
+            )
+
+    outcome = await pull_config(
+        device_id=device_id,
+        triggered_by=current_user.id,
+        credential_id=body.credential_id,
+        username=body.username,
+        password=body.password,
+        port=body.port,
+    )
+
+    if not outcome.success:
+        # Map domain error codes onto HTTP status codes. The "code" field in
+        # detail lets the frontend pattern-match without parsing free text —
+        # in particular, "credentials_required" should trigger the manual
+        # credentials form.
+        status_map = {
+            "credentials_required": 400,
+            "credential_not_found": 404,
+            "device_missing": 404,
+            "auth_failed": 401,
+            "timeout": 408,
+            "ssh_error": 502,
+        }
+        status_code = status_map.get(outcome.error_code or "", 500)
+        raise HTTPException(
+            status_code=status_code,
+            detail={
+                "code": outcome.error_code,
+                "message": outcome.error_message
+                or "Failed to pull configuration",
+            },
+        )
+
+    return DevicePullResult(
+        device_id=device_id,
+        detected_os=outcome.detected_os or device.os_type or "",
+        snapshot_id=outcome.running_snapshot_id,        # type: ignore[arg-type]
+        config_hash=outcome.running_hash,               # type: ignore[arg-type]
+        config_preview=outcome.running_preview or "",
+        change_event_id=outcome.change_event_id,
+        startup_supported=outcome.startup_supported,
+        startup_pull_failed=outcome.startup_pull_failed,
+        startup_snapshot_id=outcome.startup_snapshot_id,
+        startup_hash=outcome.startup_hash,
+        startup_preview=outcome.startup_preview,
+        in_sync=outcome.in_sync,
+    )
 
 
 @router.post("/{device_id}/refresh-facts", response_model=DeviceOut)
