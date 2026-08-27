@@ -30,10 +30,7 @@ services:
       retries: 10
 
   api:
-    build: .
     restart: unless-stopped
-    volumes:
-      - .:/app
     ports:
       - "8000:8000"
     environment:
@@ -56,11 +53,8 @@ services:
         condition: service_healthy
 
   worker:
-    build: .
     restart: unless-stopped
     entrypoint: ["celery", "-A", "app.workers.celery_app", "worker", "--pool=solo", "--loglevel=info"]
-    volumes:
-      - .:/app
     environment:
       - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-ncm}:${POSTGRES_PASSWORD:-ncmpassword}@db:5432/${POSTGRES_DB:-ncmdb}
       - DB_USE_NULL_POOL=true
@@ -75,11 +69,8 @@ services:
         condition: service_healthy
 
   beat:
-    build: .
     restart: unless-stopped
     entrypoint: ["celery", "-A", "app.workers.celery_app", "beat", "--loglevel=info"]
-    volumes:
-      - .:/app
     environment:
       - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-ncm}:${POSTGRES_PASSWORD:-ncmpassword}@db:5432/${POSTGRES_DB:-ncmdb}
       - DB_USE_NULL_POOL=true

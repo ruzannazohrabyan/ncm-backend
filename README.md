@@ -23,8 +23,18 @@ openssl rand -hex 32
 
 ### 2. Docker-ով գործարկել
 
+**Local development** (builds from source code, auto-loaded):
 ```bash
 docker-compose up --build
+```
+
+**Production** (pulls pre-built image from Docker Hub):
+```bash
+# Set the image name (or add DOCKER_IMAGE to your .env)
+export DOCKER_IMAGE=your-dockerhub-username/ncm-backend:latest
+
+docker-compose -f docker-compose.yml -f docker-compose.prod.yml pull
+docker-compose -f docker-compose.yml -f docker-compose.prod.yml up -d
 ```
 
 API կլինի հասանելի `http://localhost:8000/api/docs`-ով:

@@ -1,0 +1,20 @@
+version: "3.9"
+
+# Automatically loaded by docker-compose for local development.
+# Builds images from local source code and mounts source for live reload.
+
+services:
+  api:
+    build: .
+    volumes:
+      - .:/app
+
+  worker:
+    build: .
+    volumes:
+      - .:/app
+
+  beat:
+    build: .
+    volumes:
+      - .:/app
